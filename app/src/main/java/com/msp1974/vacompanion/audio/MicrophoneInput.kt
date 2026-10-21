@@ -4,6 +4,7 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
 import android.media.AudioDeviceInfo
+import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.AutomaticGainControl
@@ -94,6 +95,14 @@ class MicrophoneInput (
     private val bufferSize =
         AudioRecord.getMinBufferSize(sampleRateInHz, channelConfig, audioFormat)
 
+    // Devices whose built-in mic HAL only really delivers 48kHz stereo (see
+    // FunctionClasses.MIC_NATIVE_48K_STEREO) - capture in that format and convert to
+    // 16kHz mono ourselves. Set per AudioRecord, as it only applies to the built-in mic.
+    private val hasNative48kStereoMic =
+        UnsupportedFunctionsDevice.isIssueDevice(FunctionClasses.MIC_NATIVE_48K_STEREO)
+    @Volatile
+    private var downsampler: Stereo48kToMono16k? = null
+
     val isRecording
         get() = audioRecord?.recordingState == AudioRecord.RECORDSTATE_RECORDING
 
@@ -117,16 +126,31 @@ class MicrophoneInput (
 
         Timber.i(
             "Using microphone: ${preferred.device?.productName} ${AudioInRouter.getDeviceTypeName(preferred.device?.type ?: -1)}, AudioSource: ${VACAAudioFormat.getAudioSourceName(preferred.audioSource)}")
-        val record = AudioRecord(
-            preferred.audioSource,
-            sampleRateInHz,
-            channelConfig,
-            audioFormat,
-            bufferSize * 2
-        )
+        val convert = hasNative48kStereoMic && isBuiltIn
+        val record = if (convert) {
+            Timber.i("Capturing 48kHz stereo and converting to 16kHz mono for this device")
+            AudioRecord(
+                preferred.audioSource,
+                Stereo48kToMono16k.INPUT_RATE_HZ,
+                AudioFormat.CHANNEL_IN_STEREO,
+                audioFormat,
+                AudioRecord.getMinBufferSize(
+                    Stereo48kToMono16k.INPUT_RATE_HZ, AudioFormat.CHANNEL_IN_STEREO, audioFormat
+                ) * 2
+            )
+        } else {
+            AudioRecord(
+                preferred.audioSource,
+                sampleRateInHz,
+                channelConfig,
+                audioFormat,
+                bufferSize * 2
+            )
+        }
         check(record.state == AudioRecord.STATE_INITIALIZED) {
             "Failed to initialize AudioRecord"
         }
+        downsampler = if (convert) Stereo48kToMono16k() else null
         micController.applyPreferredDevice(record, preferred.device)
         setupAudioEffects(record, attachNs = !isBuiltIn)
 
@@ -176,7 +200,8 @@ class MicrophoneInput (
     }
 
     fun readShort(bufferSize: Int = VACAAudioFormat.DEFAULT_BUFFER_SIZE_IN_SHORTS, applyEnhancement: Boolean = true): ShortArray {
-        val audioBuffer = ShortArray(bufferSize)
+        val converter = downsampler
+        val audioBuffer = ShortArray(if (converter != null) bufferSize * Stereo48kToMono16k.RATIO else bufferSize)
         // Snapshot the current record under the lock rather than null-checking then reading -
         // otherwise a concurrent recreateAudioRecord() swap could be observed as null right
         // after the check, throwing and permanently ending the caller's read loop. A mid-swap
@@ -184,8 +209,9 @@ class MicrophoneInput (
         val audioRecord = synchronized(audioRecordLock) { this.audioRecord } ?: return ShortArray(0)
         val readCount = audioRecord.read(audioBuffer, 0, audioBuffer.size)
         if (readCount > 0) {
-            totalFramesRead += readCount
-            val frame = audioBuffer.copyOfRange(0, readCount)
+            val frame = converter?.process(audioBuffer, readCount) ?: audioBuffer.copyOfRange(0, readCount)
+            if (frame.isEmpty()) return frame
+            totalFramesRead += frame.size
             val micGain = if (isMicSuppressed()) -5 else config.micGain
             if (applyEnhancement) {
                 // processFrame() internally no-ops on AGC/noise suppression when the

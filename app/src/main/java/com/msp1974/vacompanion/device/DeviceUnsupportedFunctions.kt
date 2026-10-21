@@ -3,7 +3,9 @@ package com.msp1974.vacompanion.device
 import android.os.Build
 
 enum class FunctionClasses {
-    AUDIO_ENHANCEMENTS
+    AUDIO_ENHANCEMENTS,
+    // Built-in mic HAL ignores the requested format and always delivers 48kHz stereo
+    MIC_NATIVE_48K_STEREO,
 }
 
 class IssueDevice(
@@ -27,6 +29,13 @@ class UnsupportedFunctionsDevice {
                 make = "facebook",
                 model = "portal+",
                 issues = listOf(FunctionClasses.AUDIO_ENHANCEMENTS)
+            ),
+            // Lenovo Smart Clock 2 - built-in mic returns 48kHz stereo whatever is requested,
+            // so 16kHz mono capture comes back 6x slowed down
+            IssueDevice(
+                make = "lenovo",
+                model = "lenovocd-24502f",
+                issues = listOf(FunctionClasses.MIC_NATIVE_48K_STEREO)
             ),
         )
 

@@ -1,0 +1,51 @@
+name: Classroom clock build
+
+# Fork-only: builds the debug APK for the Lenovo Smart Clock 2 mic fix.
+# Signed locally after download; no secrets needed here.
+on:
+  push:
+    branches:
+      - lenovo-clock-mic
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      # Placeholder - the real Firebase config is the upstream author's secret
+      - name: Create placeholder google-services.json
+        run: |
+          cat > app/google-services.json <<'JSON'
+          {
+            "project_info": {"project_number": "000000000000", "project_id": "vaca-local-build", "storage_bucket": "vaca-local-build.appspot.com"},
+            "client": [{
+              "client_info": {"mobilesdk_app_id": "1:000000000000:android:0000000000000000", "android_client_info": {"package_name": "com.msp1974.vacompanion"}},
+              "oauth_client": [],
+              "api_key": [{"current_key": "AIzaSyA-local-build-placeholder-key-0000"}],
+              "services": {"appinvite_service": {"other_platform_oauth_client": []}}
+            }],
+            "configuration_version": "1"
+          }
+          JSON
+
+      - run: chmod +x ./gradlew
+
+      - name: Unit tests
+        run: ./gradlew testDebugUnitTest
+
+      - name: Build debug APK
+        run: ./gradlew assembleDebug
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vaca-clock-debug
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error

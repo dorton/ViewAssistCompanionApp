@@ -45,6 +45,10 @@ private const val MIC_LEVEL_GAUGE_MIN_DBFS =
     AutomaticGainController.BASE_TARGET_LEVEL_DBFS + AudioEnhancer.MIC_GAIN_MIN_DB - MIC_LEVEL_GAUGE_MARGIN_DB
 private const val MIC_LEVEL_GAUGE_MAX_DBFS = 0f
 
+/** Maps a dBFS mic level onto the 0..100 "Mic Level" gauge (also reported to HA as mic_level). */
+fun micLevelGaugePercent(audioLevelDbfs: Float): Float =
+    ((audioLevelDbfs - MIC_LEVEL_GAUGE_MIN_DBFS) / (MIC_LEVEL_GAUGE_MAX_DBFS - MIC_LEVEL_GAUGE_MIN_DBFS) * 100f).coerceIn(0f, 100f)
+
 
 @SuppressLint("DefaultLocale")
 @Composable
@@ -57,7 +61,7 @@ fun DiagnosticBar(
     val isPortrait = configuration.orientation == Configuration.ORIENTATION_PORTRAIT
     var expanded by remember { mutableStateOf(false) }
     val labelColour = Color.White
-    val micLevel0to100 = ((diagnosticInfo.audioLevel - MIC_LEVEL_GAUGE_MIN_DBFS) / (MIC_LEVEL_GAUGE_MAX_DBFS - MIC_LEVEL_GAUGE_MIN_DBFS) * 100f).coerceIn(0f, 100f)
+    val micLevel0to100 = micLevelGaugePercent(diagnosticInfo.audioLevel)
 
     Column(
         modifier = modifier

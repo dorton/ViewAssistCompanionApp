@@ -85,7 +85,9 @@ open class MicroWakeWordEngine (
                     val audio = microphoneInput.readBytes()
                     val frameTimestamp = System.currentTimeMillis()
 
-                    if (config.diagnosticsEnabled) {
+                    // Always emitted (not just with the diagnostics overlay on) - the level is
+                    // also reported to HA as the mic_level sensor
+                    run {
                         val audioBytes = ByteArray(audio.remaining())
                         audio.get(audioBytes)
                         audio.rewind()

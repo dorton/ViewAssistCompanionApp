@@ -29,6 +29,8 @@ class DeviceInfo @Inject constructor(val context: Context) {
             put("has_battery", hardware.hasBattery)
             put("has_front_camera", hardware.hasFrontCamera)
             put("has_dnd", features.supportsDND)
+            // Fork: status events carry mic_level / wake_word_score sensors
+            put("reports_wake_levels", true)
             put("proximity_sensor_type", hardware.proximitySensorType)
             putJsonObject("audio") {
                 put("max_music_volume", features.audio.maxMusicVolume)

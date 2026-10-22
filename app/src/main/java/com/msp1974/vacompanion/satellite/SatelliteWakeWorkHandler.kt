@@ -42,6 +42,10 @@ interface IWakeWordHandler {
     // exception), as opposed to being stopped deliberately via stop(). The caller decides
     // whether/how to recover (see issue #65 - previously nothing did, leaving capture dead).
     fun onEngineFailure(error: Throwable)
+
+    // Called every LEVEL_REPORT_INTERVAL_MS with the peak mic level (linear 0..1) and peak
+    // wake word score (0..1) seen since the last call, for reporting to HA as sensors.
+    fun onLevelReport(audioLevel: Float, detectionScore: Float)
 }
 
 abstract class SatelliteWakeWorkHandler(val context: Context, val deviceManager: DeviceManager, val scope: CoroutineScope): IWakeWordHandler {
@@ -52,6 +56,7 @@ abstract class SatelliteWakeWorkHandler(val context: Context, val deviceManager:
         // comfortably cover normal teardown time; if it's hit, that's a real problem worth
         // surfacing (see stop()), not silently ignoring.
         private const val STOP_TIMEOUT_MS = 1000L
+        private const val LEVEL_REPORT_INTERVAL_MS = 2000L
     }
 
     val config = deviceManager.config
@@ -76,6 +81,10 @@ abstract class SatelliteWakeWorkHandler(val context: Context, val deviceManager:
     private val detectionCooldowns = mutableMapOf<String, Long>()
     private val detectionCooldownMs: Long = 2000L
     private var lastWakeDetectionTimestamp = 0L
+    // Peaks since the last onLevelReport() - written by the engine collector, read/reset by levelReportJob
+    @Volatile private var peakAudioLevel = 0f
+    @Volatile private var peakDetectionScore = 0f
+    private var levelReportJob: Job? = null
 
     suspend fun run() {
         val startTime = System.currentTimeMillis()
@@ -129,6 +138,7 @@ abstract class SatelliteWakeWorkHandler(val context: Context, val deviceManager:
                     // is called (job enters the Cancelling state), long before cleanup finishes -
                     // polling on it let a new engine start while the old one's native audio
                     // resources were still being torn down on another thread, causing crashes.
+                    levelReportJob?.cancel()
                     wakeWordJob?.cancel()
                     handlerJob?.cancel()
                     wakeWordJob?.join()
@@ -146,8 +156,10 @@ abstract class SatelliteWakeWorkHandler(val context: Context, val deviceManager:
                 engine = null
                 wakeWordJob = null
                 handlerJob = null
+                levelReportJob = null
                 state = WakeWordHandlerState.STOPPED
                 onDiagnostics(0f, 0f)
+                onLevelReport(0f, 0f)
                 Timber.d("Wake word detection stopped")
             }
         }
@@ -162,12 +174,24 @@ abstract class SatelliteWakeWorkHandler(val context: Context, val deviceManager:
 
         //sendDiagnostics(0f, 0f)
         val flow = engine!!.start()
+        levelReportJob?.cancel()
+        levelReportJob = scope.launch {
+            while (true) {
+                delay(LEVEL_REPORT_INTERVAL_MS.milliseconds)
+                val level = peakAudioLevel
+                val score = peakDetectionScore
+                peakAudioLevel = 0f
+                peakDetectionScore = 0f
+                onLevelReport(level, score)
+            }
+        }
         wakeWordJob = scope.launch {
             try {
                 flow.cancellable().collect {
                     when (it) {
                         is WakeWordEngineProvider.AudioResult.WakeDetected -> {
                             holdLastDetectionLevel(it.detection.score)
+                            if (it.detection.score > peakDetectionScore) peakDetectionScore = it.detection.score
                             if (it.detection.detected) {
                                 val now = System.currentTimeMillis()
                                 val lastDetection = detectionCooldowns[it.detection.wakeWordId]
@@ -205,6 +229,7 @@ abstract class SatelliteWakeWorkHandler(val context: Context, val deviceManager:
                         }
 
                         is WakeWordEngineProvider.AudioResult.AudioLevel -> {
+                            if (it.level > peakAudioLevel) peakAudioLevel = it.level
                             if (config.diagnosticsEnabled) {
                                 onDiagnostics(it.level, lastWakeWordDetectionScore)
                             }

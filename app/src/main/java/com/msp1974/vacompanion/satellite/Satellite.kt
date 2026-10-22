@@ -13,6 +13,7 @@ import com.msp1974.vacompanion.device.Camera
 import com.msp1974.vacompanion.device.DeviceManager
 import com.msp1974.vacompanion.device.VolumeObserver
 import com.msp1974.vacompanion.ui.DiagnosticInfo
+import com.msp1974.vacompanion.ui.components.micLevelGaugePercent
 import com.msp1974.vacompanion.audio.AudioInRouter
 import com.msp1974.vacompanion.utils.Event
 import com.msp1974.vacompanion.utils.FirebaseManager
@@ -57,6 +58,8 @@ import timber.log.Timber
 import java.time.Instant
 import java.time.format.DateTimeFormatter
 import java.util.Date
+import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlin.text.ifEmpty
 import kotlin.time.Duration.Companion.milliseconds
@@ -113,6 +116,10 @@ abstract class Satellite(var context: Context, val deviceManager: DeviceManager,
 
     private var lastAudioLevel = 0f
     private var lastDetectionLevel = 0f
+    // Last mic_level / wake_word_score sent to HA, to only resend on a meaningful change
+    private var lastReportedMicLevel = -1f
+    private var lastReportedWakeScore = -1f
+    private var lastLevelReportMs = 0L
 
     private val audioLogManager: SatelliteAudioLog = SatelliteAudioLog(config).apply {
         onPlaybackStatusChanged = { playing ->
@@ -379,6 +386,10 @@ abstract class Satellite(var context: Context, val deviceManager: DeviceManager,
 
                 override fun onDiagnostics(level: Float, lastDetectionLevel: Float) {
                     sendDiagnostics(level, lastDetectionLevel)
+                }
+
+                override fun onLevelReport(audioLevel: Float, detectionScore: Float) {
+                    reportWakeLevels(audioLevel, detectionScore)
                 }
 
             }.also {
@@ -727,6 +738,33 @@ abstract class Satellite(var context: Context, val deviceManager: DeviceManager,
         sendCustomEvent(WyomingCustomEventType.STATUS, data)
     }
 
+    /**
+     * Reports the peak mic level and wake word score of the last window to HA as the
+     * mic_level / wake_word_score sensors, in the same units as the diagnostics overlay
+     * (0..100 gauge, score x10 to match the wake word threshold setting). Only sent when
+     * changed meaningfully, or once a minute, to keep HA's recorder light.
+     */
+    private fun reportWakeLevels(audioLevel: Float, detectionScore: Float) {
+        if (clientId == "") return
+        val micLevel = micLevelGaugePercent(AudioDSP().linearToDbfs(audioLevel)).roundToInt().toFloat()
+        val wakeScore = (detectionScore * 100).roundToInt() / 10f
+        val now = System.currentTimeMillis()
+        if (wakeScore == lastReportedWakeScore
+            && abs(micLevel - lastReportedMicLevel) < LEVEL_REPORT_MIN_CHANGE
+            && now - lastLevelReportMs < LEVEL_REPORT_MAX_INTERVAL_MS
+        ) return
+        lastReportedMicLevel = micLevel
+        lastReportedWakeScore = wakeScore
+        lastLevelReportMs = now
+        sendStatus(buildJsonObject {
+            put("timestamp", Date().toString())
+            putJsonObject("sensors") {
+                put("mic_level", micLevel)
+                put("wake_word_score", wakeScore)
+            }
+        })
+    }
+
     fun sendSetting(name: String, value: Any) {
         sendCustomEvent(WyomingCustomEventType.SETTINGS, buildJsonObject {
             put("timestamp", isoNow())
@@ -893,6 +931,10 @@ abstract class Satellite(var context: Context, val deviceManager: DeviceManager,
 
     companion object {
         fun isoNow(): String = DateTimeFormatter.ISO_INSTANT.format(Instant.now())
+
+        // mic_level / wake_word_score reporting to HA (see reportWakeLevels)
+        private const val LEVEL_REPORT_MIN_CHANGE = 3f
+        private const val LEVEL_REPORT_MAX_INTERVAL_MS = 60_000L
 
         // Upper bound on how long a short notification sound (wake sound/error sound) could
         // plausibly take to report ENDED, in case that never arrives (e.g. player error) - keeps
